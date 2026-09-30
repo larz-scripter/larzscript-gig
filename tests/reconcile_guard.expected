@@ -1,0 +1,16 @@
+cara balance is now $100
+created xxxxxxxx  "Odd amount test"  1 milestone(s)
+full id: UUID
+milestone 0 submitted
+milestone 0 marked disputed
+error: dispute split does not reconcile to the milestone amount - try a rounder percentage (line 168)
+cara: $89.99
+sam: $0
+id:         UUID
+title:      Odd amount test
+client:     cara
+freelancer: sam
+status:     active
+holding:    $10.01
+milestones:
+  [0] Design  $10.01  [disputed]

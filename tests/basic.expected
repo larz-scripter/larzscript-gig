@@ -1,0 +1,32 @@
+cara balance is now $500
+created xxxxxxxx  "Landing page"  2 milestone(s)
+full id: UUID
+cara: $100
+id:         UUID
+title:      Landing page
+client:     cara
+freelancer: sam
+status:     active
+holding:    $400
+milestones:
+  [0] Wireframes  $100  [pending]
+  [1] Build  $300  [pending]
+milestone 0 submitted
+milestone 0 approved and paid
+sam: $100
+milestone 1 submitted
+milestone 1 marked disputed
+resolved: freelancer gets $180, client refunded $120
+sam: $280
+cara: $220
+id:         UUID
+title:      Landing page
+client:     cara
+freelancer: sam
+status:     completed
+holding:    $0
+milestones:
+  [0] Wireframes  $100  [approved]
+  [1] Build  $300  [resolved]
+      resolved: freelancer $180, client $120 - partial credit - scope was ambiguous
+sam: 1 contract(s) completed, 1 milestone(s) approved clean, 1 disputed

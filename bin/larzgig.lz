@@ -1,0 +1,183 @@
+#!/usr/bin/env larzscript
+# larzgig - CLI for the multi-milestone freelance contracts in lib/gig.lz.
+#
+#   larzgig fund cara 500
+#   larzgig create cara sam "Landing page" Wireframes 100 Build 300
+#   larzgig submit <id> 0
+#   larzgig approve <id> 0
+#   larzgig dispute <id> 1 "build doesn't match the wireframes"
+#   larzgig resolve <id> 1 0.5 "partial credit - scope was ambiguous"
+#   larzgig show <id>
+#   larzgig reputation sam
+#
+# --board=path overrides the default ./board.json
+
+import "../lib/vendor/args.lz" as argparse
+import "../lib/vendor/table.lz" as table
+import "../lib/gig.lz" as gig
+
+let VERSION = "0.1.0"
+
+let USAGE = "larzgig " + VERSION + " - multi-milestone freelance contracts, backed by real escrow\n" +
+  "\n" +
+  "usage:\n" +
+  "  larzgig fund <name> <amount>\n" +
+  "  larzgig create <client> <freelancer> <title> <m1_title> <m1_amount> [<m2_title> <m2_amount> ...]\n" +
+  "  larzgig submit <id> <milestone_index>\n" +
+  "  larzgig approve <id> <milestone_index>\n" +
+  "  larzgig dispute <id> <milestone_index> <reason>\n" +
+  "  larzgig resolve <id> <milestone_index> <to_freelancer_pct> <note>\n" +
+  "  larzgig list\n" +
+  "  larzgig show <id>\n" +
+  "  larzgig reputation <name>\n" +
+  "  larzgig balance <name>\n" +
+  "\n" +
+  "options:\n" +
+  "  --board=<path>   board file to read/write (default: ./board.json)\n"
+
+fn fail(msg) { print("error: " + msg); exit(1) }
+fn short(id) { return id[0:8] }
+
+fn _find_by_prefix(board, prefix) {
+  if len(prefix) < 4 { return nil }
+  for id in keys(board["contracts"]) {
+    if id.starts_with(prefix) { return id }
+  }
+  return nil
+}
+
+fn cmd_fund(board, positional) {
+  if len(positional) < 2 { fail("fund needs <name> <amount>") }
+  let name = positional[0]
+  let amount = float(positional[1])
+  gig.fund(board, name, amount)
+  print(name + " balance is now $" + str(gig.balance(board, name)))
+}
+
+fn cmd_create(board, positional) {
+  if len(positional) < 5 { fail("create needs <client> <freelancer> <title> then pairs of <milestone_title> <milestone_amount>") }
+  let client = positional[0]
+  let freelancer = positional[1]
+  let title = positional[2]
+  let rest = positional[3:]
+  if len(rest) < 2 or len(rest) % 2 != 0 { fail("milestones must come in <title> <amount> pairs") }
+  let milestones = []
+  let i = 0
+  while i < len(rest) {
+    milestones.push({"title": rest[i], "amount": float(rest[i + 1])})
+    i = i + 2
+  }
+  let r = gig.create_contract(board, client, freelancer, title, milestones)
+  if not r["ok"] { fail(r["error"]) }
+  print("created " + short(r["id"]) + "  \"" + title + "\"  " + str(len(milestones)) + " milestone(s)")
+  print("full id: " + r["id"])
+}
+
+fn cmd_submit(board, positional) {
+  if len(positional) < 2 { fail("submit needs <id> <milestone_index>") }
+  let id = _find_by_prefix(board, positional[0])
+  if id == nil { fail("no contract matching id " + positional[0]) }
+  let r = gig.submit_milestone(board, id, int(positional[1]))
+  if not r["ok"] { fail(r["error"]) }
+  print("milestone " + positional[1] + " submitted")
+}
+
+fn cmd_approve(board, positional) {
+  if len(positional) < 2 { fail("approve needs <id> <milestone_index>") }
+  let id = _find_by_prefix(board, positional[0])
+  if id == nil { fail("no contract matching id " + positional[0]) }
+  let r = gig.approve_milestone(board, id, int(positional[1]))
+  if not r["ok"] { fail(r["error"]) }
+  print("milestone " + positional[1] + " approved and paid")
+}
+
+fn cmd_dispute(board, positional) {
+  if len(positional) < 3 { fail("dispute needs <id> <milestone_index> <reason>") }
+  let id = _find_by_prefix(board, positional[0])
+  if id == nil { fail("no contract matching id " + positional[0]) }
+  let r = gig.dispute_milestone(board, id, int(positional[1]), positional[2])
+  if not r["ok"] { fail(r["error"]) }
+  print("milestone " + positional[1] + " marked disputed")
+}
+
+fn cmd_resolve(board, positional) {
+  if len(positional) < 4 { fail("resolve needs <id> <milestone_index> <to_freelancer_pct> <note>") }
+  let id = _find_by_prefix(board, positional[0])
+  if id == nil { fail("no contract matching id " + positional[0]) }
+  let r = gig.resolve_dispute(board, id, int(positional[1]), float(positional[2]), positional[3])
+  if not r["ok"] { fail(r["error"]) }
+  print("resolved: freelancer gets $" + str(r["freelancer_amount"]) + ", client refunded $" + str(r["client_amount"]))
+}
+
+fn cmd_list(board) {
+  let active = gig.list_active(board)
+  if len(active) == 0 { print("no active contracts"); return }
+  let rows = [["id", "title", "client", "freelancer", "milestones", "holding"]]
+  for c in active {
+    rows.push([short(c["id"]), c["title"], c["client"], c["freelancer"], str(len(c["milestones"])), "$" + str(c["holding_balance"])])
+  }
+  print(table.render(rows))
+}
+
+fn cmd_show(board, positional) {
+  if len(positional) < 1 { fail("show needs <id>") }
+  let id = _find_by_prefix(board, positional[0])
+  if id == nil { fail("no contract matching id " + positional[0]) }
+  let c = gig.get_contract(board, id)
+  print("id:         " + c["id"])
+  print("title:      " + c["title"])
+  print("client:     " + c["client"])
+  print("freelancer: " + c["freelancer"])
+  print("status:     " + c["status"])
+  print("holding:    $" + str(c["holding_balance"]))
+  print("milestones:")
+  let i = 0
+  while i < len(c["milestones"]) {
+    let m = c["milestones"][i]
+    print("  [" + str(i) + "] " + m["title"] + "  $" + str(m["amount"]) + "  [" + m["status"] + "]")
+    if m["resolution"] != nil {
+      print("      resolved: freelancer $" + str(m["resolution"]["freelancer_amount"]) + ", client $" + str(m["resolution"]["client_amount"]) + " - " + m["resolution"]["note"])
+    }
+    i = i + 1
+  }
+}
+
+fn cmd_reputation(board, positional) {
+  if len(positional) < 1 { fail("reputation needs <name>") }
+  let r = gig.reputation_of(board, positional[0])
+  print(positional[0] + ": " + str(r["contracts_completed"]) + " contract(s) completed, " +
+        str(r["milestones_approved_clean"]) + " milestone(s) approved clean, " +
+        str(r["milestones_disputed"]) + " disputed")
+}
+
+fn cmd_balance(board, positional) {
+  if len(positional) < 1 { fail("balance needs <name>") }
+  print(positional[0] + ": $" + str(gig.balance(board, positional[0])))
+}
+
+fn main() {
+  let parsed = argparse.parse(args)
+  let positional = parsed["positional"]
+  if len(positional) < 1 { print(USAGE); exit(1) }
+  let command = positional[0]
+  let rest = positional[1:]
+  let board_path = argparse.flag(parsed, "board", "board.json")
+  let board = gig.load(board_path)
+
+  if command == "fund" { cmd_fund(board, rest) }
+  else if command == "create" { cmd_create(board, rest) }
+  else if command == "submit" { cmd_submit(board, rest) }
+  else if command == "approve" { cmd_approve(board, rest) }
+  else if command == "dispute" { cmd_dispute(board, rest) }
+  else if command == "resolve" { cmd_resolve(board, rest) }
+  else if command == "list" { cmd_list(board) }
+  else if command == "show" { cmd_show(board, rest) }
+  else if command == "reputation" { cmd_reputation(board, rest) }
+  else if command == "balance" { cmd_balance(board, rest) }
+  else if command == "help" or command == "--help" or command == "-h" { print(USAGE); exit(0) }
+  else { fail("unknown command \"" + command + "\" - see: larzgig help") }
+
+  gig.save(board, board_path)
+}
+
+main()

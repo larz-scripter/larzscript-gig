@@ -1,0 +1,210 @@
+# gig - multi-milestone freelance contracts, backed by real escrow. A
+# client funds a contract's full budget into escrow up front, split
+# across named milestones; each milestone releases to the freelancer on
+# approval, one at a time, from the same shared holding wallet - the
+# LarzBounty/LarzCrowd shape (escrow.open/release), but repeated
+# SEQUENTIALLY against ONE ongoing contract instead of once.
+#
+# The genuinely new mechanic is dispute resolution: LarzCrowd's refund
+# and LarzBounty's release are always all-or-nothing to ONE side. A
+# disputed milestone here can be SPLIT - an arbiter sets what fraction
+# goes to the freelancer and what fraction goes back to the client, and
+# a real `require` checks the two independently-rounded amounts actually
+# sum back to the milestone's own amount before either payment happens
+# (they don't always - see resolve_dispute()'s own comment).
+#
+#   import "gig" as gig
+#   let b = gig.load("board.json")
+#   gig.fund(b, "cara", 500.00)                             # demo-only faucet
+#   let id = gig.create_contract(b, "cara", "sam", "Landing page",
+#       [{"title": "Wireframes", "amount": 100.00}, {"title": "Build", "amount": 300.00}])
+#   gig.submit_milestone(b, id, 0)
+#   gig.approve_milestone(b, id, 0)                         # pays sam $100 now
+#   gig.dispute_milestone(b, id, 1, "build doesn't match the wireframes")
+#   gig.resolve_dispute(b, id, 1, 0.5, "partial credit - scope was ambiguous")
+#   gig.save(b, "board.json")
+
+import "vendor/json.lz" as json
+import "vendor/escrow.lz" as escrow
+import "moneyx.lz" as moneyx
+import "vendor/uuid.lz" as uuid
+
+fn new_board() { return {"wallets": {}, "contracts": {}, "reputation": {}} }
+
+fn load(path) {
+  if not file_exists(path) { return new_board() }
+  return json.parse(read_file(path))
+}
+
+fn save(board, path) { write_file(path, json.pretty(board)) }
+
+fn balance(board, name) { return board["wallets"].has(name) ? board["wallets"][name] : 0.0 }
+
+fn _set_balance(board, name, f) { board["wallets"][name] = f }
+
+# Demo-only faucet - see the sibling LarzBounty/LarzCrowd/LarzInsure
+# projects' own README precedent for why this exists and isn't a real
+# payment rail.
+fn fund(board, name, amount) { _set_balance(board, name, balance(board, name) + amount) }
+
+fn get_contract(board, id) { return board["contracts"].has(id) ? board["contracts"][id] : nil }
+
+fn list_active(board) {
+  let out = []
+  for id in keys(board["contracts"]) {
+    let c = board["contracts"][id]
+    if c["status"] == "active" { out.push(c) }
+  }
+  return out
+}
+
+fn reputation_of(board, name) {
+  if not board["reputation"].has(name) {
+    return {"contracts_completed": 0, "milestones_approved_clean": 0, "milestones_disputed": 0}
+  }
+  return board["reputation"][name]
+}
+
+fn _total(milestones) {
+  let sum = 0.0
+  for m in milestones { sum = sum + m["amount"] }
+  return sum
+}
+
+# Funds the ENTIRE contract budget into escrow up front - the client's
+# money is real and gone from their wallet the moment the contract is
+# created, before a single milestone is even submitted. Milestones are
+# plain {"title":.., "amount":..} dicts; each gets a "status" of
+# "pending" and no "resolution" yet.
+fn create_contract(board, client, freelancer, title, milestones) {
+  let total = _total(milestones)
+  wallet client_w = moneyx.of(balance(board, client))
+  wallet holding
+
+  try {
+    escrow.open(moneyx.of(total), client_w, holding)
+  } catch e {
+    return {"ok": false, "error": e["message"]}
+  }
+
+  _set_balance(board, client, moneyx.to_float(client_w.balance))
+
+  let id = uuid.v4()
+  let ms = []
+  for m in milestones {
+    ms.push({"title": m["title"], "amount": m["amount"], "status": "pending", "resolution": nil})
+  }
+  board["contracts"][id] = {
+    "id": id, "client": client, "freelancer": freelancer, "title": title,
+    "status": "active", "holding_balance": moneyx.to_float(holding.balance),
+    "milestones": ms, "created_at": time()
+  }
+  return {"ok": true, "id": id}
+}
+
+fn submit_milestone(board, contract_id, idx) {
+  let c = get_contract(board, contract_id)
+  if c == nil { return {"ok": false, "error": "no such contract"} }
+  if idx < 0 or idx >= len(c["milestones"]) { return {"ok": false, "error": "no such milestone"} }
+  let m = c["milestones"][idx]
+  if m["status"] != "pending" { return {"ok": false, "error": "milestone is " + m["status"] + ", not pending"} }
+  m["status"] = "submitted"
+  return {"ok": true}
+}
+
+# Releases exactly this milestone's amount from the shared holding
+# wallet to the freelancer - a real, single `pay`, leaving every OTHER
+# milestone's money untouched in the same wallet.
+fn approve_milestone(board, contract_id, idx) {
+  let c = get_contract(board, contract_id)
+  if c == nil { return {"ok": false, "error": "no such contract"} }
+  if idx < 0 or idx >= len(c["milestones"]) { return {"ok": false, "error": "no such milestone"} }
+  let m = c["milestones"][idx]
+  if m["status"] != "submitted" { return {"ok": false, "error": "milestone is " + m["status"] + ", not submitted"} }
+
+  wallet holding = moneyx.of(c["holding_balance"])
+  wallet freelancer_w = moneyx.of(balance(board, c["freelancer"]))
+  escrow.release(moneyx.of(m["amount"]), holding, freelancer_w)
+
+  _set_balance(board, c["freelancer"], moneyx.to_float(freelancer_w.balance))
+  c["holding_balance"] = moneyx.to_float(holding.balance)
+  m["status"] = "approved"
+
+  _maybe_complete(board, c)
+  return {"ok": true}
+}
+
+fn dispute_milestone(board, contract_id, idx, reason) {
+  let c = get_contract(board, contract_id)
+  if c == nil { return {"ok": false, "error": "no such contract"} }
+  if idx < 0 or idx >= len(c["milestones"]) { return {"ok": false, "error": "no such milestone"} }
+  let m = c["milestones"][idx]
+  if m["status"] != "submitted" { return {"ok": false, "error": "milestone is " + m["status"] + ", not submitted - only a submitted milestone can be disputed"} }
+  m["status"] = "disputed"
+  m["dispute_reason"] = reason
+  return {"ok": true}
+}
+
+# Splits a disputed milestone's locked amount between the freelancer and
+# the client, by arbiter-chosen fraction. The two shares are rounded
+# INDEPENDENTLY (freelancer's share to the cent, client's share to the
+# cent) rather than one computed as "whatever's left" - which means they
+# do not always sum back to the milestone's exact amount (a $10.01
+# milestone split 50/50 rounds to $5.01 + $5.00 = $10.01 fine, but plenty
+# of amount/percentage combinations drift by a cent either way). The
+# require below catches that for real and refuses the split rather than
+# silently paying out a cent more or less than was ever actually locked.
+fn resolve_dispute(board, contract_id, idx, to_freelancer_pct, note) {
+  let c = get_contract(board, contract_id)
+  if c == nil { return {"ok": false, "error": "no such contract"} }
+  if idx < 0 or idx >= len(c["milestones"]) { return {"ok": false, "error": "no such milestone"} }
+  let m = c["milestones"][idx]
+  if m["status"] != "disputed" { return {"ok": false, "error": "milestone is " + m["status"] + ", not disputed"} }
+
+  let freelancer_amt = round(m["amount"] * to_freelancer_pct, 2)
+  let client_amt = round(m["amount"] * (1.0 - to_freelancer_pct), 2)
+
+  try {
+    require freelancer_amt + client_amt == m["amount"], "dispute split does not reconcile to the milestone amount - try a rounder percentage"
+  } catch e {
+    return {"ok": false, "error": e["message"]}
+  }
+
+  wallet holding = moneyx.of(c["holding_balance"])
+  wallet freelancer_w = moneyx.of(balance(board, c["freelancer"]))
+  wallet client_w = moneyx.of(balance(board, c["client"]))
+
+  if freelancer_amt > 0.0 { escrow.release(moneyx.of(freelancer_amt), holding, freelancer_w) }
+  if client_amt > 0.0 { escrow.refund(moneyx.of(client_amt), holding, client_w) }
+
+  _set_balance(board, c["freelancer"], moneyx.to_float(freelancer_w.balance))
+  _set_balance(board, c["client"], moneyx.to_float(client_w.balance))
+  c["holding_balance"] = moneyx.to_float(holding.balance)
+  m["status"] = "resolved"
+  m["resolution"] = {"to_freelancer_pct": to_freelancer_pct, "freelancer_amount": freelancer_amt, "client_amount": client_amt, "note": note}
+
+  _maybe_complete(board, c)
+  return {"ok": true, "freelancer_amount": freelancer_amt, "client_amount": client_amt}
+}
+
+# A contract completes the moment every milestone has reached a terminal
+# state (approved or resolved) - at which point the freelancer's
+# reputation updates: one more completed contract, plus a running count
+# of how many milestones went through clean (approved on the first ask)
+# versus needed arbitration. A lower dispute rate is a real, checkable
+# reputation signal, not a star rating someone typed in.
+fn _maybe_complete(board, c) {
+  for m in c["milestones"] {
+    if m["status"] != "approved" and m["status"] != "resolved" { return }
+  }
+  c["status"] = "completed"
+  if not board["reputation"].has(c["freelancer"]) {
+    board["reputation"][c["freelancer"]] = {"contracts_completed": 0, "milestones_approved_clean": 0, "milestones_disputed": 0}
+  }
+  let rep = board["reputation"][c["freelancer"]]
+  rep["contracts_completed"] = rep["contracts_completed"] + 1
+  for m in c["milestones"] {
+    if m["status"] == "approved" { rep["milestones_approved_clean"] = rep["milestones_approved_clean"] + 1 }
+    else { rep["milestones_disputed"] = rep["milestones_disputed"] + 1 }
+  }
+}

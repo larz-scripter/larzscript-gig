@@ -1,0 +1,9 @@
+cara balance is now $100
+created xxxxxxxx  "Only Contract"  1 milestone(s)
+full id: UUID
+error: no contract matching id 
+error: no contract matching id ab
+error: milestone is pending, not submitted
+milestone 0 submitted
+milestone 0 approved and paid
+error: milestone is approved, not submitted - only a submitted milestone can be disputed
